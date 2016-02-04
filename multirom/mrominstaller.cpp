@@ -10,6 +10,7 @@
 #include "mrominstaller.h"
 #include "../minzip/SysUtil.h"
 #include "../minzip/Zip.h"
+#include "multirom_Zip.h"
 #include "../common.h"
 #include "multirom.h"
 #include "cutils/properties.h"

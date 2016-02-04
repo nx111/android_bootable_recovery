@@ -22,6 +22,7 @@
 #include "../twinstall.h"
 #include "../minzip/SysUtil.h"
 #include "../minzip/Zip.h"
+#include "multirom_Zip.h"
 #include "../verifier.h"
 #include "../variables.h"
 #include "../openrecoveryscript.hpp"
