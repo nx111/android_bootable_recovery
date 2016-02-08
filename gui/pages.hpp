@@ -34,6 +34,11 @@ struct language_struct {
 	std::string displayvalue;
 };
 
+inline bool operator < (const language_struct& language1, const language_struct& language2)
+{
+	return language1.displayvalue < language2.displayvalue;
+}
+
 extern std::vector<language_struct> Language_List;
 
 // Utility Functions
@@ -178,7 +183,6 @@ protected:
 protected:
 	static std::map<std::string, PageSet*> mPageSets;
 	static PageSet* mCurrentSet;
-	static PageSet* mBaseSet;
 	static MouseCursor *mMouseCursor;
 	static HardwareKeyboard *mHardwareKeyboard;
 	static bool mReloadTheme;

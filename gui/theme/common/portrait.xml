@@ -70,7 +70,7 @@
 
 		<style name="tab">
 			<highlight color="%highlight_color%"/>
-			<fill color="%accent_color%"/>
+			<fill color="%transparent%"/>
 			<font resource="font_s" color="%text_button_color%"/>
 		</style>
 
@@ -1075,6 +1075,12 @@
 			<text style="text_m_fail">
 				<placement x="%center_x%" y="%row4_y%" placement="5"/>
 				<text>{@format_data_ptr3=removes encryption on internal storage.}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<condition var1="tw_has_adopted_storage" var2="1"/>
+				<placement x="%center_x%" y="%row5_y%" placement="5"/>
+				<text>{@format_data_adopted=Including Adopted Storage}</text>
 			</text>
 
 			<text style="text_m">
@@ -2847,7 +2853,11 @@
 			<button style="main_button_half_height">
 				<placement x="%center_x%" y="%row21a_y%"/>
 				<text>{@restore_defaults_btn=Restore Defaults}</text>
-				<action function="restoredefaultsettings"/>
+				<actions>
+					<action function="set">tw_samsung_navbar=0</action>
+					<action function="set">tw_tab_icons=0</action>
+					<action function="restoredefaultsettings"/>
+				</actions>
 			</button>
 
 			<action>
@@ -3158,9 +3168,10 @@
 			</button>
 
 			<button style="main_button">
+				<condition var1="tw_has_data_media" var2="1"/>
 				<placement x="%center_x%" y="%row2a_y%"/>
-				<text>{@fix_perm_btn=Fix Permissions}</text>
-				<action function="page">fixperms</action>
+				<text>{@fix_context_btn=Fix Contexts}</text>
+				<action function="page">fixcontexts</action>
 			</button>
 
 			<button style="main_button">
@@ -3243,7 +3254,8 @@
 				<text>{@part_sd_hdr=Partition SD Card}</text>
 			</text>
 
-			<partitionlist style="partitionlist_storage">
+			<partitionlist>
+				<placement x="%indent%" y="%row1a_y%" w="%content_width%" h="%partitionlist_storage_height%"/>
 				<text>{@sel_storage_list=Select Storage}</text>
 				<data name="tw_storage_path"/>
 				<listtype name="storage"/>
@@ -3251,12 +3263,12 @@
 
 			<text style="text_m_fail">
 				<condition var1="partitionlisterror" var2="1"/>
-				<placement x="%center_x%" y="%row17_y%" placement="5"/>
+				<placement x="%center_x%" y="%row20_y%" placement="5"/>
 				<text>{@invalid_partsd_sel=You must select a removable device}</text>
 			</text>
 
-			<button style="button_third_width">
-				<placement x="%dialog_button_x%" y="%row14_y%"/>
+			<button style="main_button_half_height">
+				<placement x="%center_x%" y="%row21a_y%"/>
 				<text>{@ok_btn=OK}</text>
 				<actions>
 					<action function="getpartitiondetails">tw_storage_path</action>
@@ -4038,7 +4050,7 @@
 			<text style="text_m_fail">
 				<condition var1="tw_password_fail" var2="1"/>
 				<placement x="%indent%" y="%row5_y%"/>
-				<text>{@decryt_data_failed=Password failed, please try again!}</text>
+				<text>{@decrypt_data_failed=Password failed, please try again!}</text>
 			</text>
 
 			<button style="main_button_half_height">
@@ -4080,7 +4092,7 @@
 			<text style="text_m_fail">
 				<condition var1="tw_password_fail" var2="1"/>
 				<placement x="%center_x%" y="%row3_y%" placement="5"/>
-				<text>{@decryt_data_failed_pattern=Pattern failed, please try again!}</text>
+				<text>{@decrypt_data_failed_pattern=Pattern failed, please try again!}</text>
 			</text>
 
 			<patternpassword>
@@ -4353,7 +4365,7 @@
 			</action>
 		</page>
 
-		<page name="fixperms">
+		<page name="fixcontexts">
 			<template name="page"/>
 
 			<text style="text_l">
@@ -4363,37 +4375,31 @@
 
 			<text style="text_m">
 				<placement x="%col1_x_header%" y="%row4_header_y%"/>
-				<text>{@fix_perms_hdr=Fix Permissions}</text>
+				<text>{@fix_contexts_hdr=Fix Contexts}</text>
 			</text>
 
 			<text style="text_m_accent">
 				<placement x="%center_x%" y="%row2_y%" placement="5"/>
-				<text>{@fix_perms_note=Note: Fixing permissions is rarely needed.}</text>
+				<text>{@fix_contexts_note1=Note: Fixing contexts is rarely needed.}</text>
 			</text>
-
-			<checkbox>
-				<placement x="%indent%" y="%row4_y%"/>
-				<text>{@fix_perms_selinux_chk=Also fix SELinux Contexts}</text>
-				<data variable="tw_fixperms_restorecon"/>
-			</checkbox>
 
 			<text style="text_m_fail">
 				<placement x="%center_x%" y="%row6_y%" placement="5"/>
-				<text>{@fix_perms_sel_note1=Fixing SELinux Contexts may cause}</text>
+				<text>{@fix_contexts_note2=Fixing SELinux Contexts may cause}</text>
 			</text>
 
 			<text style="text_m_fail">
 				<placement x="%center_x%" y="%row7_y%" placement="5"/>
-				<text>{@fix_perms_sel_note2=your device to not boot properly.}</text>
+				<text>{@fix_contexts_note3=your device to not boot properly.}</text>
 			</text>
 
 			<slider>
-				<text>{@swipe_to_fix_perms=Swipe to Fix Permissions}</text>
+				<text>{@swipe_to_fix_contexts=Swipe to Fix Contexts}</text>
 				<actions>
 					<action function="set">tw_back=advanced</action>
-					<action function="set">tw_action=fixpermissions</action>
-					<action function="set">tw_action_text1={@fixing_perms=Fixing Permissions...}</action>
-					<action function="set">tw_complete_text1={@fix_perms_complete=Fix Permissions Complete}</action>
+					<action function="set">tw_action=fixcontexts</action>
+					<action function="set">tw_action_text1={@fixing_contexts=Fixing Contexts...}</action>
+					<action function="set">tw_complete_text1={@fix_contexts_complete=Fix Contexts Complete}</action>
 					<action function="set">tw_slider_text={@swipe_to_confirm=Swipe to Confirm}</action>
 					<action function="set">tw_show_reboot=1</action>
 					<action function="page">action_page</action>

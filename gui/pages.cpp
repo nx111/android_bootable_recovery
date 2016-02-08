@@ -36,14 +36,15 @@
 #include "../partitions.hpp"
 
 #include <string>
+#include <algorithm>
 
 extern "C" {
 #include "../twcommon.h"
-#include "../minuitwrp/minui.h"
 #include "../minzip/SysUtil.h"
 #include "../minzip/Zip.h"
 #include "gui.h"
 }
+#include "../minuitwrp/minui.h"
 
 #include "rapidxml.hpp"
 #include "objects.hpp"
@@ -64,7 +65,6 @@ extern std::vector<std::string> gConsoleColor;
 
 std::map<std::string, PageSet*> PageManager::mPageSets;
 PageSet* PageManager::mCurrentSet;
-PageSet* PageManager::mBaseSet = NULL;
 MouseCursor *PageManager::mMouseCursor = NULL;
 HardwareKeyboard *PageManager::mHardwareKeyboard = NULL;
 bool PageManager::mReloadTheme = false;
@@ -1334,6 +1334,8 @@ void PageManager::LoadLanguageList(ZipArchive* package) {
 	} else {
 		LoadLanguageListDir(TWRES "languages/");
 	}
+
+	std::sort(Language_List.begin(), Language_List.end());
 }
 
 void PageManager::LoadLanguage(string filename) {
@@ -1421,10 +1423,6 @@ int PageManager::LoadPackage(std::string name, std::string package, std::string 
 			LOGERR("Package %s failed to load.\n", name.c_str());
 	}
 
-	// The first successful package we loaded is the base
-	if (mBaseSet == NULL)
-		mBaseSet = mCurrentSet;
-
 	mCurrentSet = pageSet;
 
 	if (pZip) {
@@ -1500,8 +1498,6 @@ int PageManager::ReloadPackage(std::string name, std::string package)
 	}
 	if (mCurrentSet == set)
 		SelectPackage(name);
-	if (mBaseSet == set)
-		mBaseSet = mCurrentSet;
 	delete set;
 	GUIConsole::Translate_Now();
 	return 0;
@@ -1518,6 +1514,8 @@ void PageManager::ReleasePackage(std::string name)
 	PageSet* set = (*iter).second;
 	mPageSets.erase(iter);
 	delete set;
+	if (set == mCurrentSet)
+		mCurrentSet = NULL;
 	return;
 }
 
