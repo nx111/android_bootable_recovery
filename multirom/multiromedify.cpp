@@ -200,6 +200,13 @@ int EdifyFunc::replaceOffendings(std::list<EdifyElement*> **parentList, std::lis
             addArg(new EdifyValue("\"\""));
         }
     }
+    else if(m_name == "range_sha1")
+    {
+        res |= OFF_CHANGED;
+        m_name = "true || " + m_name;
+        lastNewlineRef = (*parentList)->insert(++lastNewlineRef, new EdifyValue(std::string("# MultiROM made if on the next line always pass")));
+        lastNewlineRef = (*parentList)->insert(++lastNewlineRef, new EdifyNewline());
+    }
 
     for(std::list<EdifyElement*>::iterator itr = m_args.begin(); itr != m_args.end(); ++itr)
     {
@@ -520,33 +527,6 @@ bool EdifyHacker::writeToFile(const std::string& path)
     for(std::list<EdifyElement*>::iterator itr = m_elements.begin(); itr != m_elements.end(); ++itr)
         (*itr)->write(f);
     fclose(f);
-    
-    {
-        // get rid of 'range_sha1' checks on
-        // the system partition used by newer 
-        // installer-scripts, such as CM13 & other
-        // Andorid 6 (Marshmallow) builds
-        
-        // i'm sure there's a more elegant way
-        // but this will have to suffice for the
-        // time being
-        char strSEDcmd[250];
-
-        #define SED_CMD     "sed -i "
-        #define SED_P1      "'s/"
-        #define SED_P2      "range_sha1.*(.*\\/dev\\/block\\/.*).*==.*\".*\""
-        #define SED_P3      "/"
-        #define SED_P4      "\\/sbin\\/true"
-        #define SED_P5      "/'"
-
-        #define SED_FULL    SED_CMD SED_P1 SED_P2 SED_P3 SED_P4 SED_P5
-
-        sprintf (strSEDcmd, "echo About to execute:%s %s", SED_FULL, path.c_str());
-        system (strSEDcmd);
-
-        sprintf (strSEDcmd, "%s %s", SED_FULL, path.c_str());
-        system (strSEDcmd);
-    }
     return true;
 }
 

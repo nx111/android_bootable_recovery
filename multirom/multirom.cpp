@@ -120,7 +120,7 @@ void MultiROM::findPath()
 	m_boot_dev = boot->Actual_Block_Device;
 
 	TWPartition *fw = PartitionManager.Find_Partition_By_Path("/firmware");
-	m_has_firmware = (fw && fw->Current_File_System == "vfat");
+	m_has_firmware = (fw && (fw->Current_File_System == "vfat" || fw->Current_File_System == "ext4"));
 
 	static const char *paths[] = {
 		"/data/media/multirom",
@@ -329,17 +329,11 @@ bool MultiROM::restorecon(std::string name)
 	if(!changeMounts(name))
 		goto exit;
 
-#if PLATFORM_SDK_VERSION >= 21
-  #define RESTORECON_ARGS "-RFDv"
-#else
-  #define RESTORECON_ARGS "-RFv"
-#endif
-
 	static const char * const parts[] = { "/system", "/data", "/cache", NULL };
 	for(int i = 0; parts[i]; ++i)
 	{
 		gui_print("Running restorecon on ROM's %s\n", parts[i]);
-		system_args("restorecon %s %s", RESTORECON_ARGS, parts[i]);
+		system_args("restorecon -RFDv %s", parts[i]);
 	}
 
 	// SuperSU moves the real app_process into _original
@@ -735,6 +729,10 @@ bool MultiROM::changeMounts(std::string name)
 	// recovery.fstab and manages to mount the real /system
 	system("mv /etc/recovery.fstab /etc/recovery.fstab.bak");
 
+	// This shim prevents everything from mounting anything as read-only
+	system("mv /sbin/mount /sbin/mount_real");
+	system("cp -a /sbin/mount_shim.sh /sbin/mount");
+
 	return true;
 }
 
@@ -747,6 +745,7 @@ void MultiROM::restoreMounts()
 
 	//system("mv /sbin/umount.bak /sbin/umount");
 	system("mv /etc/recovery.fstab.bak /etc/recovery.fstab");
+	system("if [ -e /sbin/mount_real ]; then mv /sbin/mount_real /sbin/mount; fi;");
 
 	// script might have mounted it several times over, we _have_ to umount it all
 	system("sync;"
@@ -2185,7 +2184,7 @@ const base_folder& MultiROM::addBaseFolder(const std::string& name, int min, int
 const base_folder& MultiROM::addBaseFolder(const base_folder& b)
 {
 	LOGINFO("MROMInstaller: base folder: %s (min: %dMB def: %dMB)\n", b.name.c_str(), b.min_size, b.size);
-	return m_base_folders.insert(std::make_pair<std::string, base_folder>(b.name, b)).first->second;
+	return m_base_folders.insert(std::make_pair(b.name, b)).first->second;
 }
 
 MultiROM::baseFolders& MultiROM::getBaseFolders()
