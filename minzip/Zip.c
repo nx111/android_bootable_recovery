@@ -431,7 +431,7 @@ int mzOpenZipArchive(unsigned char* addr, size_t length, ZipArchive* pArchive)
 
     if (length < ENDHDR) {
         err = -1;
-        LOGV("File '%s' too small to be zip (%zd)\n", fileName, map.length);
+        LOGV("File too small to be zip\n");  // LOGV("File '%s' too small to be zip (%zd)\n", fileName, map.length);
         goto bail;
     }
 
@@ -440,7 +440,7 @@ int mzOpenZipArchive(unsigned char* addr, size_t length, ZipArchive* pArchive)
 
     if (!parseZipArchive(pArchive)) {
         err = -1;
-        LOGV("Parsing '%s' failed\n", fileName);
+        LOGV("Parsing zip archive failed\n");  // LOGV("Parsing '%s' failed\n", fileName);
         goto bail;
     }
 
