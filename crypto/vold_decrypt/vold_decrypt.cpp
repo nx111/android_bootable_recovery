@@ -320,6 +320,9 @@ bool Symlink_Vendor_Folder(void) {
 			LOGDECRYPT_KMSG("Symlinking /system/vendor/lib to /vendor/lib (res=%d)\n",
 				symlink("/system/vendor/lib", "/vendor/lib")
 			);
+			LOGDECRYPT_KMSG("Symlinking /system/vendor/bin to /vendor/bin (res=%d)\n",
+				symlink("/system/vendor/bin", "/vendor/bin")
+			);
 			is_vendor_symlinked = true;
 			property_set("vold_decrypt.symlinked_vendor", "1");
 		}
@@ -467,6 +470,10 @@ int vold_decrypt(string Password)
 	LOGDECRYPT("TW_CRYPTO_USE_SYSTEM_VOLD := true\n");
 	LOGDECRYPT("Attempting to use system's vold for decryption...\n");
 
+	LOGDECRYPT("Moving /etc/recovery.fstab (%d)\n", rename("/etc/recovery.fstab", "/etc/recovery-fstab-orig"));
+	LOGDECRYPT("Symlinking /etc/recovery.fstab to /fstab.htc_ocn (%d)\n", symlink("/fstab.htc_ocn", "/etc/recovery.fstab"));
+
+
 #ifndef TW_CRYPTO_SYSTEM_VOLD_DISABLE_TIMEOUT
 	has_timeout = TWFunc::Path_Exists("/sbin/timeout");
 	if (!has_timeout)
@@ -607,6 +614,10 @@ int vold_decrypt(string Password)
 	}
 	output_dmesg_to_log = true;
 #endif
+
+	LOGDECRYPT("Removing /etc/recovery.fstab symlink (%d)\n", unlink("/etc/recovery.fstab"));
+	LOGDECRYPT("Restoring /etc/recovery.fstab (%d)\n", rename("/etc/recovery-fstab-orig", "/etc/recovery.fstab"));
+
 
 	// Finish up and exit
 	if (fp_kmsg) {
