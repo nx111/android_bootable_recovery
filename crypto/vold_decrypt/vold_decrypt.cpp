@@ -23,6 +23,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <dirent.h>
+#include <fnmatch.h>
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
 #include <signal.h>
@@ -355,22 +357,49 @@ void Restore_Firmware_Folder(void) {
 	rename("/firmware-orig", "/firmware");
 }
 
+int Find_Firmware_Files(string Path, vector<string> *FileList) {
+	DIR* d;
+	struct dirent* de;
+	string FileName;
+	int ret;
+
+	d = opendir(Path.c_str());
+	if (d == NULL) {
+		closedir(d);
+		return -1;
+	}
+	while ((de = readdir(d)) != NULL) {
+		if (de->d_type == DT_DIR) {
+			if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+				continue;
+			FileName = Path + "/" + de->d_name;
+			ret = Find_Firmware_Files(FileName, FileList);
+			if (ret < 0)
+				return -1;
+		}
+		else if (de->d_type == DT_REG) {
+			if (fnmatch("keymaste*.*", de->d_name, 0) == 0 || fnmatch("cmnlib.*", de->d_name, 0) == 0) {
+				FileName = Path + "/" + de->d_name;
+				FileList->push_back(FileName);
+			}
+		}
+	}
+	closedir(d);
+	return 0;
+}
+
 void Symlink_Firmware_Files(bool is_vendor_symlinked, bool is_firmware_symlinked) {
 	if (!is_vendor_symlinked && !is_firmware_symlinked)
 		return;
 
 	LOGDECRYPT("Symlinking firmware files...\n");
-	string result_of_find;
-	TWFunc::Exec_Cmd("find /system -name keymaste*.* -type f -o -name cmnlib.* -type f 2>/dev/null", result_of_find);
 
-	stringstream ss(result_of_find);
-	string line;
-	int count = 0;
+	vector<string> FirmwareFiles;
+	Find_Firmware_Files("/system", &FirmwareFiles);
 
-	while(getline(ss, line)) {
-		const char *fwfile = line.c_str();
-		string base_name = TWFunc::Get_Filename(line);
-		count++;
+	for (size_t i = 0; i < FirmwareFiles.size(); ++i) {
+		const char *fwfile = FirmwareFiles[i].c_str();
+		string base_name = TWFunc::Get_Filename(FirmwareFiles[i]);
 
 		if (is_firmware_symlinked) {
 			LOGDECRYPT_KMSG("Symlinking %s to /firmware/image/ (res=%d)\n", fwfile,
@@ -388,7 +417,7 @@ void Symlink_Firmware_Files(bool is_vendor_symlinked, bool is_firmware_symlinked
 			);
 		}
 	}
-	LOGDECRYPT("%d file(s) symlinked.\n", count);
+	LOGDECRYPT("%d file(s) symlinked.\n", (int)FirmwareFiles.size());
 }
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
