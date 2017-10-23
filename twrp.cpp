@@ -129,6 +129,19 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 	PartitionManager.Output_Partition_Logging();
+
+#if 1
+	// debug build: don't use && in sh calls to avoid a fail leading to all others failing
+	TWFunc::Exec_Cmd("dmesg >/tmp/dmesg");           // add a dmesg to /tmp
+	PartitionManager.Mount_By_Path("/cache", true);  // yeah show error
+
+	// use Exec_Cmd to see output
+	TWFunc::Exec_Cmd("rm -rf /cache/LOGS-OLD");         // delete OLD (if it exists)
+	TWFunc::Exec_Cmd("mv /cache/LOGS /cache/LOGS-OLD"); // rename current to OLD  (if it exists)
+	TWFunc::Exec_Cmd("mkdir -p -m 777 /cache/LOGS");    // mkdir -p (no errors and mode 777)
+	TWFunc::Exec_Cmd("cp -f /tmp/* /cache/LOGS");       // force overwrite, we don't want any y/n
+#endif
+
 	// Load up all the resources
 	gui_loadResources();
 
