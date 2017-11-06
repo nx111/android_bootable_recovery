@@ -16,34 +16,38 @@
     along with TWRP.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/mount.h>
 #include <sys/time.h>
+#include <dirent.h>
+#include <fnmatch.h>
 
-#ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#endif
 
 #include <string>
 #include <vector>
 #include <sstream>
 
-#include "../../twcommon.h"
 #include "../../partitions.hpp"
 #include "../../twrp-functions.hpp"
-#include "../../gui/gui.hpp"
 
 using namespace std;
 
 extern "C" {
 	#include <cutils/properties.h>
 }
+
+#include "vold_decrypt.h"
+
+
+namespace {
 
 /* Timeouts as defined by ServiceManager */
 
@@ -53,6 +57,12 @@ extern "C" {
 /* The minimal sleeping interval between checking for the service's state
  * when looping for SLEEP_MAX_USEC */
 #define  SLEEP_MIN_USEC      200000  /* 200 msec */
+
+
+/* vold response codes defined in ResponseCode.h */
+// 200 series - Requested action has been successfully completed
+#define COMMAND_OKAY           200
+#define PASSWORD_TYPE_RESULT   213
 
 
 #define LOGDECRYPT(...) do { printf(__VA_ARGS__); if (fp_kmsg) { fprintf(fp_kmsg, "[VOLD_DECRYPT]" __VA_ARGS__); fflush(fp_kmsg); } } while (0)
@@ -68,38 +78,85 @@ typedef struct {
 #endif
 
 FILE *fp_kmsg = NULL;
-bool has_timeout = false;
 
+
+/* Debugging Functions */
 #ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
-bool has_strace = false;
 
-pid_t strace_init(void) {
-	if (!has_strace)
-		return -1;
+#define STRACE "/sbin/strace"
+
+bool has_strace = false;
+pid_t pid_strace = 0;
+
+void Strace_init_Start(void) {
+	has_strace = TWFunc::Path_Exists(STRACE);
+	if (!has_strace) {
+		LOGDECRYPT("strace binary not found, disabling strace in vold_decrypt!\n");
+		return;
+	}
 
 	pid_t pid;
 	switch(pid = fork())
 	{
 		case -1:
 			LOGDECRYPT_KMSG("forking strace_init failed: %d!\n", errno);
-			return -1;
+			return;
 		case 0: // child
-			execl("/sbin/strace", "strace", "-q", "-tt", "-ff", "-v", "-y", "-s", "1000", "-o", "/tmp/strace_init.log", "-p", "1" , NULL);
+			execl(STRACE, "strace", "-q", "-tt", "-ff", "-v", "-y", "-s", "1000", "-o", "/tmp/strace_init.log", "-p", "1" , NULL);
 			LOGDECRYPT_KMSG("strace_init fork failed: %d!\n", errno);
 			exit(-1);
 		default:
 			LOGDECRYPT_KMSG("Starting strace_init (pid=%d)\n", pid);
-			return pid;
+			pid_strace = pid;
+			return;
 	}
 }
-#endif
+
+void Strace_init_Stop(void) {
+	if (pid_strace > 0) {
+		LOGDECRYPT_KMSG("Stopping strace_init (pid=%d)\n", pid_strace);
+		int timeout;
+		int status;
+		pid_t retpid = waitpid(pid_strace, &status, WNOHANG);
+
+		kill(pid_strace, SIGTERM);
+		for (timeout = 5; retpid == 0 && timeout; --timeout) {
+			sleep(1);
+			retpid = waitpid(pid_strace, &status, WNOHANG);
+		}
+		if (retpid)
+			LOGDECRYPT_KMSG("strace_init terminated successfully\n");
+		else {
+			// SIGTERM didn't work, kill it instead
+			kill(pid_strace, SIGKILL);
+			for (timeout = 5; retpid == 0 && timeout; --timeout) {
+				sleep(1);
+				retpid = waitpid(pid_strace, &status, WNOHANG);
+			}
+			if (retpid)
+				LOGDECRYPT_KMSG("strace_init killed successfully\n");
+			else
+				LOGDECRYPT_KMSG("strace_init took too long to kill, may be a zombie process\n");
+		}
+	}
+}
+#endif // TW_CRYPTO_SYSTEM_VOLD_DEBUG
+
+void Output_dmesg_To_RecoveryLog(void) {
+	TWFunc::Exec_Cmd(
+		"echo \"---- DMESG LOG FOLLOWS ----\";"
+		"dmesg | grep 'DECRYPT\\|vold\\|qseecom\\|QSEECOM\\|keymaste\\|keystore\\|cmnlib';"
+		"echo \"---- DMESG LOG ENDS ----\""
+	);
+}
+
 
 /* Convert a binary key of specified length into an ascii hex string equivalent,
  * without the leading 0x and with null termination
  *
  * Original code from cryptfs.c
  */
-string convert_key_to_hex_ascii(string master_key) {
+string convert_key_to_hex_ascii(const string& master_key) {
 	size_t i;
 	unsigned char nibble;
 	string master_key_ascii = "";
@@ -117,7 +174,9 @@ string convert_key_to_hex_ascii(string master_key) {
 	return master_key_ascii;
 }
 
-string wait_for_property(string property_name, int utimeout = SLEEP_MAX_USEC, string expected_value = "not_empty") {
+
+/* Properties and Services Functions */
+string Wait_For_Property(const string& property_name, int utimeout = SLEEP_MAX_USEC, const string& expected_value = "not_empty") {
 	char prop_value[PROPERTY_VALUE_MAX];
 
 	if (expected_value == "not_empty") {
@@ -145,161 +204,75 @@ string wait_for_property(string property_name, int utimeout = SLEEP_MAX_USEC, st
 	return prop_value;
 }
 
-bool Service_Exists(string initrc_svc) {
+string Get_Service_State(const string& initrc_svc) {
 	char prop_value[PROPERTY_VALUE_MAX];
 	string init_svc = "init.svc." + initrc_svc;
 	property_get(init_svc.c_str(), prop_value, "error");
-	return (strcmp(prop_value, "error") != 0);
+	return prop_value;
 }
 
-bool Is_Service_Running(string initrc_svc) {
-	char prop_value[PROPERTY_VALUE_MAX];
-	string init_svc = "init.svc." + initrc_svc;
-	property_get(init_svc.c_str(), prop_value, "error");
-	return (strcmp(prop_value, "running") == 0);
+bool Service_Exists(const string& initrc_svc) {
+	return (Get_Service_State(initrc_svc) != "error");
 }
 
-bool Is_Service_Stopped(string initrc_svc) {
-	char prop_value[PROPERTY_VALUE_MAX];
-	string init_svc = "init.svc." + initrc_svc;
-	property_get(init_svc.c_str(), prop_value, "error");
-	return (strcmp(prop_value, "stopped") == 0);
+bool Is_Service_Running(const string& initrc_svc) {
+	return (Get_Service_State(initrc_svc) == "running");
 }
 
-bool Start_Service(string initrc_svc, int utimeout = SLEEP_MAX_USEC) {
+bool Is_Service_Stopped(const string& initrc_svc) {
+	return (Get_Service_State(initrc_svc) == "stopped");
+}
+
+bool Start_Service(const string& initrc_svc, int utimeout = SLEEP_MAX_USEC) {
 	string res = "error";
 	string init_svc = "init.svc." + initrc_svc;
 
 	property_set("ctl.start", initrc_svc.c_str());
 
-	res = wait_for_property(init_svc, utimeout, "running");
+	res = Wait_For_Property(init_svc, utimeout, "running");
 
 	LOGDECRYPT("Start service %s: %s.\n", initrc_svc.c_str(), res.c_str());
 
 	return (res == "running");
 }
 
-bool Stop_Service(string initrc_svc, int utimeout = SLEEP_MAX_USEC) {
+bool Stop_Service(const string& initrc_svc, int utimeout = SLEEP_MAX_USEC) {
 	string res = "error";
 
 	if (Service_Exists(initrc_svc)) {
 		string init_svc = "init.svc." + initrc_svc;
 		property_set("ctl.stop", initrc_svc.c_str());
-		res = wait_for_property(init_svc, utimeout, "stopped");
+		res = Wait_For_Property(init_svc, utimeout, "stopped");
 		LOGDECRYPT("Stop service %s: %s.\n", initrc_svc.c_str(), res.c_str());
 	}
 
 	return (res == "stopped");
 }
 
-void output_dmesg_to_recoverylog(void) {
-	TWFunc::Exec_Cmd(
-		"echo \"---- DMESG LOG FOLLOWS ----\";"
-		"dmesg | grep 'DECRYPT\\|vold\\|qseecom\\|QSEECOM\\|keymaste\\|keystore\\|cmnlib';"
-		"echo \"---- DMESG LOG ENDS ----\""
-	);
-}
+#ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+vector<AdditionalService> Get_List_Of_Additional_Services (void) {
+	vector<AdditionalService> services;
 
-void set_needed_props(void) {
-	// vold won't start without ro.storage_structure on Kitkat
-	string sdkverstr = TWFunc::System_Property_Get("ro.build.version.sdk");
-	int sdkver = 20;
-	if (!sdkverstr.empty()) {
-		sdkver = atoi(sdkverstr.c_str());
+	vector<string> service_names = TWFunc::Split_String(TW_CRYPTO_SYSTEM_VOLD_SERVICES, " ");
+
+	for (size_t i = 0; i < service_names.size(); ++i) {
+		AdditionalService svc;
+		svc.service_name = service_names[i];
+		services.push_back(svc);
 	}
-	if (sdkver <= 19) {
-		string ro_storage_structure = TWFunc::System_Property_Get("ro.storage_structure");
-		if (!ro_storage_structure.empty())
-			property_set("ro.storage_structure", ro_storage_structure.c_str());
-	}
+
+	return services;
 }
-
-string vdc_cryptfs_cmd(string log_name) {
-	string cmd = "LD_LIBRARY_PATH=/system/lib64:/system/lib /system/bin/vdc cryptfs";
-
-#ifndef TW_CRYPTO_SYSTEM_VOLD_DEBUG
-	(void)log_name; // do nothing, but get rid of compiler warning in non debug builds
-#else
-	if (has_timeout && has_strace)
-		cmd = "/sbin/strace -q -tt -ff -v -y -s 1000 -o /tmp/strace_vdc_" + log_name + " /sbin/timeout -t 30 -s KILL env " + cmd;
-	else if (has_strace)
-		cmd = "/sbin/strace -q -tt -ff -v -y -s 1000 -o /tmp/strace_vdc_" + log_name + " -E " + cmd;
-	else
 #endif
-	if (has_timeout)
-		cmd = "/sbin/timeout -t 30 -s KILL env " + cmd;
 
-	return cmd;
+
+/* Vendor, Firmware and fstab symlink Functions */
+/*
+//int symlink (const char *oldname, const char *newname)
+int v_symlink(const char *oldname, const char *newname, bool verbose = false) {
+	
 }
-
-int run_vdc(string Password) {
-	int res = -1;
-	struct timeval t1, t2;
-	string vdc_res;
-	int vdc_r1, vdc_r2, vdc_r3;
-
-	LOGDECRYPT("About to run vdc...\n");
-
-	// Wait for vold connection
-	gettimeofday(&t1, NULL);
-	t2 = t1;
-	while ((t2.tv_sec - t1.tv_sec) < 5) {
-		vdc_res.clear();
-		// cryptfs getpwtype returns: R1=213(PasswordTypeResult)   R2=?   R3="password", "pattern", "pin", "default"
-		res = TWFunc::Exec_Cmd(vdc_cryptfs_cmd("connect") + " getpwtype", vdc_res);
-		std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
-		vdc_r1 = vdc_r2 = vdc_r3 = -1;
-		sscanf(vdc_res.c_str(), "%d", &vdc_r1);
-		if (vdc_r1 == 213) {
-			char str_res[sizeof(int) + 1];
-			snprintf(str_res, sizeof(str_res), "%d", res);
-			vdc_res += "ret=";
-			vdc_res += str_res;
-			res = 0;
-			break;
-		}
-		LOGDECRYPT("Retrying connection to vold\n");
-		usleep(SLEEP_MIN_USEC); // vdc usually usleep(10000), but that causes too many unnecessary attempts
-		gettimeofday(&t2, NULL);
-	}
-
-	if (res != 0)
-		return res;
-
-	LOGDECRYPT("Connected to vold (%s)\n", vdc_res.c_str());
-
-	// Input password from GUI, or default password
-	vdc_res.clear();
-	res = TWFunc::Exec_Cmd(vdc_cryptfs_cmd("passwd") + " checkpw '" + Password + "'", vdc_res);
-	std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
-	LOGDECRYPT("vdc cryptfs result (passwd): %s (ret=%d)\n", vdc_res.c_str(), res);
-	vdc_r1 = vdc_r2 = vdc_r3 = -1;
-	sscanf(vdc_res.c_str(), "%d %d %d", &vdc_r1, &vdc_r2, &vdc_r3);
-
-	if (vdc_r3 != 0) {
-		// try falling back to Lollipop hex passwords
-		string hexPassword = convert_key_to_hex_ascii(Password);
-		vdc_res.clear();
-		res = TWFunc::Exec_Cmd(vdc_cryptfs_cmd("hex_pw") + " checkpw '" + hexPassword + "'", vdc_res);
-		std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
-		LOGDECRYPT("vdc cryptfs result (hex_pw): %s (ret=%d)\n", vdc_res.c_str(), res);
-		vdc_r1 = vdc_r2 = vdc_r3 = -1;
-		sscanf(vdc_res.c_str(), "%d %d %d", &vdc_r1, &vdc_r2, &vdc_r3);
-	}
-
-	// vdc's return value is dependant upon source origin, it will either
-	// return 0 or vdc_r1, so disregard and focus on decryption instead
-	if (vdc_r3 == 0) {
-		// Decryption successful wait for crypto blk dev
-		wait_for_property("ro.crypto.fs_crypto_blkdev");
-		res = 0;
-	} else {
-		res = -1;
-	}
-
-	return res;
-}
-
+*/
 bool Symlink_Vendor_Folder(void) {
 	bool is_vendor_symlinked = false;
 
@@ -317,6 +290,9 @@ bool Symlink_Vendor_Folder(void) {
 			);
 			LOGDECRYPT_KMSG("Symlinking /system/vendor/lib to /vendor/lib (res=%d)\n",
 				symlink("/system/vendor/lib", "/vendor/lib")
+			);
+			LOGDECRYPT_KMSG("Symlinking /system/vendor/bin to /vendor/bin (res=%d)\n",
+				symlink("/system/vendor/bin", "/vendor/bin")
 			);
 			is_vendor_symlinked = true;
 			property_set("vold_decrypt.symlinked_vendor", "1");
@@ -355,22 +331,48 @@ void Restore_Firmware_Folder(void) {
 	rename("/firmware-orig", "/firmware");
 }
 
+int Find_Firmware_Files(const string& Path, vector<string> *FileList) {
+	int ret;
+	DIR* d;
+	struct dirent* de;
+	string FileName;
+
+	d = opendir(Path.c_str());
+	if (d == NULL) {
+		closedir(d);
+		return -1;
+	}
+	while ((de = readdir(d)) != NULL) {
+		if (de->d_type == DT_DIR) {
+			if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+				continue;
+			FileName = Path + "/" + de->d_name;
+			ret = Find_Firmware_Files(FileName, FileList);
+			if (ret < 0)
+				return -1;
+		} else if (de->d_type == DT_REG) {
+			if (fnmatch("keymaste*.*", de->d_name, 0) == 0 || fnmatch("cmnlib.*", de->d_name, 0) == 0) {
+				FileName = Path + "/" + de->d_name;
+				FileList->push_back(FileName);
+			}
+		}
+	}
+	closedir(d);
+	return 0;
+}
+
 void Symlink_Firmware_Files(bool is_vendor_symlinked, bool is_firmware_symlinked) {
 	if (!is_vendor_symlinked && !is_firmware_symlinked)
 		return;
 
 	LOGDECRYPT("Symlinking firmware files...\n");
-	string result_of_find;
-	TWFunc::Exec_Cmd("find /system -name keymaste*.* -type f -o -name cmnlib.* -type f 2>/dev/null", result_of_find);
 
-	stringstream ss(result_of_find);
-	string line;
-	int count = 0;
+	vector<string> FirmwareFiles;
+	Find_Firmware_Files("/system", &FirmwareFiles);
 
-	while(getline(ss, line)) {
-		const char *fwfile = line.c_str();
-		string base_name = TWFunc::Get_Filename(line);
-		count++;
+	for (size_t i = 0; i < FirmwareFiles.size(); ++i) {
+		const char *fwfile = FirmwareFiles[i].c_str();
+		string base_name = TWFunc::Get_Filename(FirmwareFiles[i]);
 
 		if (is_firmware_symlinked) {
 			LOGDECRYPT_KMSG("Symlinking %s to /firmware/image/ (res=%d)\n", fwfile,
@@ -388,31 +390,268 @@ void Symlink_Firmware_Files(bool is_vendor_symlinked, bool is_firmware_symlinked
 			);
 		}
 	}
-	LOGDECRYPT("%d file(s) symlinked.\n", count);
+	LOGDECRYPT("%d file(s) symlinked.\n", (int)FirmwareFiles.size());
 }
 
-#ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
-vector<AdditionalService> Get_List_Of_Additional_Services (void) {
-	vector<AdditionalService> services;
+// Android 8.0 fs_mgr checks for "/sbin/recovery", in which case it will use /etc/recovery.fstab -> symlink it temporarily
+bool Symlink_Recovery_Fstab(void) {
+	bool is_fstab_symlinked = false;
+	if (rename("/etc/recovery.fstab", "/etc/recovery-fstab-orig") < 0) {
+		LOGDECRYPT("Moving /etc/recovery.fstab to /etc/recovery-fstab-orig failed: %d (%s)\n", errno, strerror(errno));
+	} else {
+		// TODO: properly find primary fstab
+		char prop_value[PROPERTY_VALUE_MAX];
+		property_get("ro.hardware", prop_value, "error"); // TODO: switch all property_get to string ffs
+		string fstab_device = "/fstab.";
+		fstab_device += prop_value;
 
-	vector<string> service_names = TWFunc::Split_String(TW_CRYPTO_SYSTEM_VOLD_SERVICES, " ");
+		if (symlink(fstab_device.c_str(), "/etc/recovery.fstab") < 0) {
+			LOGDECRYPT("Symlinking /etc/recovery.fstab to %s failed: %d (%s)\n", fstab_device.c_str(), errno, strerror(errno));
+			LOGDECRYPT("Restoring original /etc/recovery.fstab (res=%d)\n", rename("/etc/recovery-fstab-orig", "/etc/recovery.fstab"));
+		} else {
+			LOGDECRYPT("Symlinked /etc/recovery.fstab to %s\n", fstab_device.c_str());
+			is_fstab_symlinked = true;
+		}
+	}
+	return is_fstab_symlinked;
+}
 
-	for (size_t i = 0; i < service_names.size(); ++i) {
-		AdditionalService svc;
-		svc.service_name = service_names[i];
-		services.push_back(svc);
+void Restore_Recovery_Fstab(void) {
+	LOGDECRYPT("Removing /etc/recovery.fstab symlink (res=%d)\n", unlink("/etc/recovery.fstab"));
+	LOGDECRYPT("Restoring /etc/recovery.fstab (res=%d)\n", rename("/etc/recovery-fstab-orig", "/etc/recovery.fstab"));
+}
+
+
+/* Misc Functions */
+void Set_Needed_Properties(void) {
+	// vold won't start without ro.storage_structure on Kitkat
+	string sdkverstr = TWFunc::System_Property_Get("ro.build.version.sdk");
+	int sdkver = 20;
+	if (!sdkverstr.empty()) {
+		sdkver = atoi(sdkverstr.c_str());
+	}
+	if (sdkver <= 19) {
+		string ro_storage_structure = TWFunc::System_Property_Get("ro.storage_structure");
+		if (!ro_storage_structure.empty())
+			property_set("ro.storage_structure", ro_storage_structure.c_str());
+	}
+}
+
+
+/* vdc Functions */
+int Exec_vdc_cryptfs(const string& command, const string& argument, string& result) {
+	pid_t pid;
+	int status;
+	int pipe_fd[2];
+
+	if (pipe(pipe_fd)) {
+		LOGDECRYPT("exec_vdc_cryptfs: pipe() error!\n");
+		return -1;
 	}
 
-	return services;
-}
+	const char *cmd[] = { "/system/bin/vdc", "cryptfs" };
+	const char *env[] = { "LD_LIBRARY_PATH=/system/lib64:/system/lib", NULL };
+
+#ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
+	string log_name = "/tmp/strace_vdc_" + command;
 #endif
 
-int vold_decrypt(string Password)
+	switch(pid = fork())
+	{
+		case -1:
+			LOGDECRYPT("exec_vdc_cryptfs: fork failed: %d (%s)!\n", errno, strerror(errno));
+			return -1;
+
+		case 0: // child
+			fflush(stdout); fflush(stderr);
+			close(pipe_fd[0]);
+			dup2(pipe_fd[1], STDOUT_FILENO);
+			dup2(pipe_fd[1], STDERR_FILENO);
+			close(pipe_fd[1]);
+
+#ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
+			if (has_strace) {
+				if (argument.empty())
+					execl(STRACE, "strace", "-q", "-tt", "-ff", "-v", "-y", "-s", "1000", "-o", log_name.c_str(),
+						"-E", env[0], cmd[0], cmd[1], command.c_str(), NULL);
+				else
+					execl(STRACE, "strace", "-q", "-tt", "-ff", "-v", "-y", "-s", "1000", "-o", log_name.c_str(),
+						  "-E", env[0], cmd[0], cmd[1], command.c_str(), argument.c_str(), NULL);
+			} else
+#endif
+			if (argument.empty())
+				execle(cmd[0], cmd[0], cmd[1], command.c_str(), NULL, env);
+			else
+				execle(cmd[0], cmd[0], cmd[1], command.c_str(), argument.c_str(), NULL, env);
+			_exit(127);
+			break;
+
+		default:
+		{
+			int timeout = 30*100;
+			result.clear();
+
+			close(pipe_fd[1]);
+
+			// Non-blocking read loop with timeout
+			int flags = fcntl(pipe_fd[0], F_GETFL, 0);
+			fcntl(pipe_fd[0], F_SETFL, flags | O_NONBLOCK);
+
+			char buffer[128];
+			ssize_t count;
+			pid_t retpid = waitpid(pid, &status, WNOHANG);
+			while (1) {
+				count = read(pipe_fd[0], buffer, sizeof(buffer));
+				if (count == -1) {
+					if (errno == EINTR)
+						continue;
+					else if (errno != EAGAIN)
+						LOGDECRYPT("exec_vdc_cryptfs: read() error %d (%s)\n!", errno, strerror(errno));
+				} else if (count > 0) {
+					result.append(buffer, count);
+				}
+
+				retpid = waitpid(pid, &status, WNOHANG);
+				if (retpid == 0 && --timeout)
+					usleep(10000);
+				else
+					break;
+			};
+
+			close(pipe_fd[0]);
+
+			// Error handling
+			if (retpid == 0 && timeout == 0) {
+				LOGDECRYPT("exec_vdc_cryptfs: took too long, killing process\n");
+				kill(pid, SIGKILL);
+				for (timeout = 5; retpid == 0 && timeout; --timeout) {
+					sleep(1);
+					retpid = waitpid(pid, &status, WNOHANG);
+				}
+				if (retpid)
+					LOGDECRYPT("exec_vdc_cryptfs: process killed successfully\n");
+				else
+					LOGDECRYPT("exec_vdc_cryptfs: process took too long to kill, may be a zombie process\n");
+				return VD_ERR_VOLD_OPERATION_TIMEDOUT;
+			} else if (retpid > 0) {
+				if (WIFSIGNALED(status)) {
+					LOGDECRYPT("exec_vdc_cryptfs: process ended with signal: %d\n", WTERMSIG(status)); // Seg fault or some other non-graceful termination
+					return -1;
+				}
+			} else if (retpid < 0) { // no PID returned
+				if (errno == ECHILD)
+					LOGDECRYPT("exec_vdc_cryptfs: no child process exist\n");
+				else {
+					LOGDECRYPT("exec_vdc_cryptfs: Unexpected error %d (%s)\n", errno, strerror(errno));
+					return -1;
+				}
+			}
+			return 0;
+		}
+	}
+}
+
+int Run_vdc(const string&  Password) {
+	int res;
+	struct timeval t1, t2;
+	string vdc_res;
+	int vdc_r1, vdc_r2, vdc_r3;
+
+	LOGDECRYPT("About to run vdc...\n");
+
+	// Wait for vold connection
+	gettimeofday(&t1, NULL);
+	t2 = t1;
+	while ((t2.tv_sec - t1.tv_sec) < 5) {
+		vdc_res.clear();
+		// cryptfs getpwtype returns: R1=213(PasswordTypeResult)   R2=?   R3="password", "pattern", "pin", "default"
+		res = Exec_vdc_cryptfs("getpwtype", "", vdc_res);
+		std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
+		vdc_r1 = vdc_r2 = vdc_r3 = -1;
+		sscanf(vdc_res.c_str(), "%d", &vdc_r1);
+		if (vdc_r1 == PASSWORD_TYPE_RESULT) {
+			char str_res[sizeof(int) + 1];
+			snprintf(str_res, sizeof(str_res), "%d", res);
+			vdc_res += "ret=";
+			vdc_res += str_res;
+			res = 0;
+			break;
+		}
+		LOGDECRYPT("Retrying connection to vold\n");
+		usleep(SLEEP_MIN_USEC); // vdc usually usleep(10000), but that causes too many unnecessary attempts
+		gettimeofday(&t2, NULL);
+	}
+
+	if (res == 0 && (t2.tv_sec - t1.tv_sec) < 5)
+		LOGDECRYPT("Connected to vold (%s)\n", vdc_res.c_str());
+	else if (res == VD_ERR_VOLD_OPERATION_TIMEDOUT)
+		return VD_ERR_VOLD_OPERATION_TIMEDOUT; // should never happen for getpwtype
+	else if (res)
+		return VD_ERR_FORK_EXECL_ERROR;
+	else
+		return VD_ERR_VDC_FAILED_TO_CONNECT;
+
+	// Input password from GUI, or default password
+	vdc_res.clear();
+
+	res = Exec_vdc_cryptfs("checkpw", Password, vdc_res);
+	if (res == VD_ERR_VOLD_OPERATION_TIMEDOUT)
+		return VD_ERR_VOLD_OPERATION_TIMEDOUT;
+	else if (res)
+		return VD_ERR_FORK_EXECL_ERROR;
+
+	std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
+	LOGDECRYPT("vdc cryptfs result (passwd): %s (ret=%d)\n", vdc_res.c_str(), res);
+	vdc_r1 = vdc_r2 = vdc_r3 = -1;
+	sscanf(vdc_res.c_str(), "%d %d %d", &vdc_r1, &vdc_r2, &vdc_r3);
+	/*
+	if (res == 0 && vdc_r1 != COMMAND_OKAY)
+		return VD_ERR_VOLD_UNEXPECTED_RESPONSE;
+	*/
+
+	if (vdc_r3 != 0) {
+		// try falling back to Lollipop hex passwords
+		string hexPassword = convert_key_to_hex_ascii(Password);
+		vdc_res.clear();
+
+		res = Exec_vdc_cryptfs("checkpw", hexPassword, vdc_res);
+		if (res == VD_ERR_VOLD_OPERATION_TIMEDOUT)
+			return VD_ERR_VOLD_OPERATION_TIMEDOUT;
+		else if (res)
+			return VD_ERR_FORK_EXECL_ERROR;
+
+		std::replace(vdc_res.begin(), vdc_res.end(), '\n', ' '); // remove newline(s)
+		LOGDECRYPT("vdc cryptfs result (hex_pw): %s (ret=%d)\n", vdc_res.c_str(), res);
+		vdc_r1 = vdc_r2 = vdc_r3 = -1;
+		sscanf(vdc_res.c_str(), "%d %d %d", &vdc_r1, &vdc_r2, &vdc_r3);
+		/*
+		if (res == 0 && vdc_r1 != COMMAND_OKAY)
+			return VD_ERR_VOLD_UNEXPECTED_RESPONSE;
+		*/
+	}
+
+	// vdc's return value is dependant upon source origin, it will either
+	// return 0 or vdc_r1, so disregard and focus on decryption instead
+	if (vdc_r3 == 0) {
+		// Decryption successful wait for crypto blk dev
+		Wait_For_Property("ro.crypto.fs_crypto_blkdev");
+		res = VD_SUCCESS;
+	} else if (vdc_r1 != COMMAND_OKAY) {
+		res = VD_ERR_VOLD_UNEXPECTED_RESPONSE;
+	} else {
+		res = VD_ERR_DECRYPTION_FAILED;
+	}
+
+	return res;
+}
+
+int Vold_Decrypt_Core(const string& Password)
 {
 	int res;
 	bool output_dmesg_to_log = false;
 	bool is_vendor_symlinked = false;
 	bool is_firmware_symlinked = false;
+	bool is_fstab_symlinked = false;
 	bool is_vold_running = false;
 
 	if (Password.empty()) {
@@ -422,15 +661,13 @@ int vold_decrypt(string Password)
 
 	// Mount system and check for vold and vdc
 	if (!PartitionManager.Mount_By_Path("/system", true)) {
-		return -1;
+		return VD_ERR_UNABLE_TO_MOUNT_SYSTEM;
 	} else if (!TWFunc::Path_Exists("/system/bin/vold")) {
 		LOGDECRYPT("ERROR: /system/bin/vold not found, aborting.\n");
-		gui_msg(Msg(msg::kError, "decrypt_data_vold_os_missing=Missing files needed for vold decrypt: {1}")("/system/bin/vold"));
-		return -1;
+		return VD_ERR_MISSING_VOLD;
 	} else if (!TWFunc::Path_Exists("/system/bin/vdc")) {
 		LOGDECRYPT("ERROR: /system/bin/vdc not found, aborting.\n");
-		gui_msg(Msg(msg::kError, "decrypt_data_vold_os_missing=Missing files needed for vold decrypt: {1}")("/system/bin/vdc"));
-		return -1;
+		return VD_ERR_MISSING_VDC;
 	}
 
 	fp_kmsg = fopen("/dev/kmsg", "a");
@@ -438,17 +675,8 @@ int vold_decrypt(string Password)
 	LOGDECRYPT("TW_CRYPTO_USE_SYSTEM_VOLD := true\n");
 	LOGDECRYPT("Attempting to use system's vold for decryption...\n");
 
-#ifndef TW_CRYPTO_SYSTEM_VOLD_DISABLE_TIMEOUT
-	has_timeout = TWFunc::Path_Exists("/sbin/timeout");
-	if (!has_timeout)
-		LOGDECRYPT("timeout binary not found, disabling timeout in vold_decrypt!\n");
-#endif
-
 #ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
-	has_strace = TWFunc::Path_Exists("/sbin/strace");
-	if (!has_strace)
-		LOGDECRYPT("strace binary not found, disabling strace in vold_decrypt!\n");
-	pid_t pid_strace = strace_init();
+	Strace_init_Start();
 #endif
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
@@ -475,11 +703,12 @@ int vold_decrypt(string Password)
 #endif
 
 	LOGDECRYPT("Setting up folders and permissions...\n");
+	is_fstab_symlinked = Symlink_Recovery_Fstab();
 	is_vendor_symlinked = Symlink_Vendor_Folder();
 	is_firmware_symlinked = Symlink_Firmware_Folder();
 	Symlink_Firmware_Files(is_vendor_symlinked, is_firmware_symlinked);
 
-	set_needed_props();
+	Set_Needed_Properties();
 
 	// Start services needed for vold decrypt
 	LOGDECRYPT("Starting services...\n");
@@ -491,7 +720,6 @@ int vold_decrypt(string Password)
 	is_vold_running = Start_Service("sys_vold");
 
 	if (is_vold_running) {
-
 #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
 		for (size_t i = 0; i < Services.size(); ++i) {
 			if (!Is_Service_Running(Services[i].service_name) && Services[i].resume) {
@@ -501,8 +729,7 @@ int vold_decrypt(string Password)
 			}
 		}
 #endif
-
-		res = run_vdc(Password);
+		res = Run_vdc(Password);
 
 		if (res != 0) {
 			// Decryption was unsuccessful
@@ -513,6 +740,7 @@ int vold_decrypt(string Password)
 		LOGDECRYPT("Failed to start vold\n");
 		TWFunc::Exec_Cmd("echo \"$(getprop | grep init.svc)\" >> /dev/kmsg");
 		output_dmesg_to_log = true;
+		res = VD_ERR_VOLD_FAILED_TO_START;
 	}
 
 	// Stop services needed for vold decrypt so /system can be unmounted
@@ -531,12 +759,14 @@ int vold_decrypt(string Password)
 		Restore_Firmware_Folder();
 	if (is_vendor_symlinked)
 		Restore_Vendor_Folder();
+	if (is_fstab_symlinked)
+		Restore_Recovery_Fstab();
 
 	if (!PartitionManager.UnMount_By_Path("/system", true)) {
 		// PartitionManager failed to unmount /system, this should not happen,
 		// but in case it does, do a lazy unmount
 		LOGDECRYPT("WARNING: system could not be unmounted normally!\n");
-		TWFunc::Exec_Cmd("umount -l /system");
+		umount2("/system", MNT_DETACH);
 	}
 
 	LOGDECRYPT("Finished.\n");
@@ -550,32 +780,7 @@ int vold_decrypt(string Password)
 #endif
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
-	if (pid_strace > 0) {
-		LOGDECRYPT_KMSG("Stopping strace_init (pid=%d)\n", pid_strace);
-		int timeout;
-		int status;
-		pid_t retpid = waitpid(pid_strace, &status, WNOHANG);
-
-		kill(pid_strace, SIGTERM);
-		for (timeout = 5; retpid == 0 && timeout; --timeout) {
-			sleep(1);
-			retpid = waitpid(pid_strace, &status, WNOHANG);
-		}
-		if (retpid)
-			LOGDECRYPT_KMSG("strace_init terminated successfully\n");
-		else {
-			// SIGTERM didn't work, kill it instead
-			kill(pid_strace, SIGKILL);
-			for (timeout = 5; retpid == 0 && timeout; --timeout) {
-				sleep(1);
-				retpid = waitpid(pid_strace, &status, WNOHANG);
-			}
-			if (retpid)
-				LOGDECRYPT_KMSG("strace_init killed successfully\n");
-			else
-				LOGDECRYPT_KMSG("strace_init took too long to kill, may be a zombie process\n");
-		}
-	}
+	Strace_init_Stop();
 	output_dmesg_to_log = true;
 #endif
 
@@ -586,13 +791,15 @@ int vold_decrypt(string Password)
 	}
 
 	if (output_dmesg_to_log)
-		output_dmesg_to_recoverylog();
-
-	// Finally check if crypto device is up
-	if (wait_for_property("ro.crypto.fs_crypto_blkdev", 0) != "error")
-		res = 0;
-	else
-		res = -1;
+		Output_dmesg_To_RecoveryLog();
 
 	return res;
+}
+
+} // namespace
+
+
+/* Main function separated from core in case we want to return error info */
+int vold_decrypt(const string& Password) {
+	return Vold_Decrypt_Core(Password);
 }
