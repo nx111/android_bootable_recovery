@@ -48,7 +48,7 @@ FILE* fopen_path(const char *path, const char *mode);
 
 void ui_print(const char* format, ...);
 
-bool is_ro_debuggable();
+static bool is_ro_debuggable();
 
 #ifdef __cplusplus
 }

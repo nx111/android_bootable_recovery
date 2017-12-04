@@ -137,7 +137,7 @@ LOCAL_STATIC_LIBRARIES :=
 LOCAL_SHARED_LIBRARIES :=
 
 LOCAL_STATIC_LIBRARIES += libguitwrp
-LOCAL_SHARED_LIBRARIES += libaosprecovery libz libc libcutils libstdc++ libtar libblkid libminuitwrp libminadbd libmtdutils libminzip libtwadbbu libbootloader_message
+LOCAL_SHARED_LIBRARIES += libaosprecovery libz libc libcutils libstdc++ libtar libblkid libminuitwrp libminadbd libmtdutils libminzip libtwadbbu libbootloader_message libbootloader_message_twrp
 LOCAL_SHARED_LIBRARIES += libcrecovery libtwadbbu libtwrpdigest
 
 #MultiROM
@@ -456,6 +456,7 @@ LOCAL_ADDITIONAL_DEPENDENCIES += \
     permissive.sh \
     simg2img_twrp \
     libbootloader_message \
+    libbootloader_message_twrp \
     init.recovery.service.rc
 
 #MultiROM
@@ -748,6 +749,7 @@ include $(LOCAL_PATH)/tests/Android.mk \
     $(LOCAL_PATH)/edify/Android.mk \
     $(LOCAL_PATH)/otafault/Android.mk \
     $(LOCAL_PATH)/bootloader_message/Android.mk \
+    $(LOCAL_PATH)/bootloader_message_twrp/Android.mk \
     $(LOCAL_PATH)/updater/Android.mk \
     $(LOCAL_PATH)/update_verifier/Android.mk \
     $(LOCAL_PATH)/applypatch/Android.mk
