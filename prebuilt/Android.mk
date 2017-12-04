@@ -283,6 +283,15 @@ LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/etc
 LOCAL_SRC_FILES := $(LOCAL_MODULE)
 include $(BUILD_PREBUILT)
 
+#busybox
+include $(CLEAR_VARS)
+LOCAL_MODULE := busybox
+LOCAL_MODULE_TAGS := eng
+LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+LOCAL_SRC_FILES := $(LOCAL_MODULE)
+include $(BUILD_PREBUILT)
+
 ifeq ($(BOARD_HAS_NO_REAL_SDCARD),)
 	ifeq ($(shell test $(PLATFORM_SDK_VERSION) -lt 23; echo $$?),0)
 	    #prebuilt, static sgdisk
@@ -496,6 +505,7 @@ ifneq ($(TW_EXCLUDE_SUPERSU), true)
 	LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/supersu
 	LOCAL_SRC_FILES := $(LOCAL_MODULE)
 	include $(BUILD_PREBUILT)
+
 endif
 
 #TWRP App "placeholder"
